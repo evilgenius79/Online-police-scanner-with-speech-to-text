@@ -11,10 +11,16 @@ numpy>=1.24.0
 
 # Voice Activity Detection
 # webrtcvad-wheels provides pre-built wheels for Python 3.10/3.11/3.12
+# (original webrtcvad fails to build from source on Python 3.11)
 # If this fails to install, try: pip install webrtcvad
 webrtcvad-wheels>=2.0.14
 
-# Speech-to-text (GPU-accelerated Whisper)
-# Requires CUDA 11.x or 12.x + cuDNN 8.x or 9.x
-# See setup.sh for full installation instructions
+# Speech-to-text (GPU-accelerated Whisper via CTranslate2)
 faster-whisper>=1.0.0
+
+# CUDA 12 runtime libraries for faster-whisper on RTX 4060.
+# These install the correct .so files WITHOUT requiring a system CUDA install.
+# Requires CUDA driver >= 525 (ships with any modern NVIDIA driver).
+# Run `nvidia-smi` to verify your driver version.
+nvidia-cublas-cu12>=12.3.0
+nvidia-cudnn-cu12>=9.0.0,<10

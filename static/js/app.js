@@ -2,7 +2,8 @@
  * Police Scanner – frontend application
  *
  * Responsibilities:
- *   1. Live audio: WebSocket → Web Audio API scheduler → speaker
+ *   1. Live audio: WebSocket → AudioWorklet (pcm-processor.js) → speaker
+ *      AudioWorklet runs on a dedicated thread — immune to main-thread jank.
  *   2. Frequency-spectrum visualiser on <canvas id="visualizer">
  *   3. WebSocket events: new_clip, transcript_ready, transmission_start/end
  *   4. Clips list: paginated REST API, date filter, prepend-on-new-clip
@@ -22,14 +23,14 @@ const SEARCH_DEBOUNCE_MS = 450;
 /* ═══════════════════════════════════════════════════════════════
    Module state
 ═══════════════════════════════════════════════════════════════ */
-let audioCtx      = null;   // AudioContext (created on user interaction)
-let gainNode      = null;   // master volume
-let analyserNode  = null;   // feeds the visualiser
-let ws            = null;   // WebSocket
+let audioCtx         = null;   // AudioContext (created on user interaction)
+let gainNode         = null;   // master volume
+let analyserNode     = null;   // feeds the visualiser
+let workletNode      = null;   // AudioWorkletNode running pcm-player-processor
+let ws               = null;   // WebSocket
 let wsReconnectTimer = null;
-let nextPlayTime  = 0;      // next scheduled playback time in audioCtx
-let wsConnected   = false;
-let vizAnimId     = null;   // requestAnimationFrame handle
+let wsConnected      = false;
+let vizAnimId        = null;   // requestAnimationFrame handle for the visualiser
 
 // Clip browser state
 let currentPage   = 1;
@@ -62,18 +63,36 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 /* ═══════════════════════════════════════════════════════════════
-   Audio context + WebSocket
+   Audio context + AudioWorklet + WebSocket
 ═══════════════════════════════════════════════════════════════ */
-function initAudioContext() {
+
+/**
+ * Create the AudioContext and load the pcm-player-processor worklet.
+ * Returns a Promise that resolves when the worklet is ready.
+ * Safe to call multiple times — resolves immediately if already initialised.
+ */
+async function initAudioContext() {
   if (audioCtx) return;
+
   audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE, latencyHint: 'interactive' });
+
+  // Load the AudioWorklet module.  The worklet runs on a dedicated thread
+  // inside the browser's audio engine — separate from the main JS thread.
+  await audioCtx.audioWorklet.addModule('/static/js/pcm-processor.js');
+  workletNode = new AudioWorkletNode(audioCtx, 'pcm-player-processor');
+
   gainNode = audioCtx.createGain();
   gainNode.gain.value = parseFloat(document.getElementById('volume').value);
+
   analyserNode = audioCtx.createAnalyser();
   analyserNode.fftSize = 512;
   analyserNode.smoothingTimeConstant = 0.6;
+
+  // Signal chain: worklet → gain → analyser → speakers
+  workletNode.connect(gainNode);
   gainNode.connect(analyserNode);
   analyserNode.connect(audioCtx.destination);
+
   startVisualiser();
 }
 
@@ -85,11 +104,16 @@ function toggleAudio() {
   }
 }
 
-function connectAudio() {
-  initAudioContext();
+async function connectAudio() {
+  try {
+    await initAudioContext();
+  } catch (err) {
+    console.error('[Scanner] AudioContext init failed:', err);
+    return;
+  }
 
   if (audioCtx.state === 'suspended') {
-    audioCtx.resume();
+    await audioCtx.resume();
   }
 
   clearTimeout(wsReconnectTimer);
@@ -118,7 +142,7 @@ function openWebSocket() {
   ws.onopen = () => {
     wsConnected = true;
     setWsStatus(true);
-    nextPlayTime = 0;  // reset playback clock on reconnect
+    // Worklet buffer resets automatically when the WebSocket reconnects.
     console.info('[Scanner] WebSocket connected');
   };
 
@@ -180,39 +204,16 @@ function handleWsMessage(event) {
 }
 
 /* ═══════════════════════════════════════════════════════════════
-   PCM scheduling (Web Audio API)
-   Each 30 ms PCM frame arrives as a raw Int16 ArrayBuffer.
-   We convert to Float32, wrap in an AudioBuffer, and schedule it
-   slightly ahead so there are no gaps between frames.
+   PCM delivery (AudioWorklet)
+   Each 30 ms frame arrives as a raw Int16 ArrayBuffer.
+   We transfer it (zero-copy) to the worklet processor thread where
+   it is converted to Float32 and queued for smooth playback.
 ═══════════════════════════════════════════════════════════════ */
 function scheduleAudio(buffer) {
-  if (!audioCtx) return;
-
-  const int16 = new Int16Array(buffer);
-  const float32 = new Float32Array(int16.length);
-  for (let i = 0; i < int16.length; i++) {
-    float32[i] = int16[i] / 32768.0;
-  }
-
-  const audioBuffer = audioCtx.createBuffer(1, float32.length, SAMPLE_RATE);
-  audioBuffer.copyToChannel(float32, 0);
-
-  const source = audioCtx.createBufferSource();
-  source.buffer = audioBuffer;
-  source.connect(gainNode);
-
-  // Keep a small lookahead buffer to prevent underruns without adding
-  // noticeable latency.  100 ms should cover scheduling jitter.
-  const LOOKAHEAD = 0.10;   // seconds
-  const now = audioCtx.currentTime;
-
-  if (nextPlayTime < now + LOOKAHEAD) {
-    // Gap detected (reconnect, tab was hidden, etc.) – resync clock.
-    nextPlayTime = now + LOOKAHEAD;
-  }
-
-  source.start(nextPlayTime);
-  nextPlayTime += audioBuffer.duration;
+  if (!workletNode) return;
+  // Transferable: passes the ArrayBuffer to the worklet thread with zero copy.
+  // After this call `buffer` is detached and must not be used on the main thread.
+  workletNode.port.postMessage(buffer, [buffer]);
 }
 
 /* ═══════════════════════════════════════════════════════════════

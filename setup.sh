@@ -51,22 +51,28 @@ pip install webrtcvad-wheels 2>/dev/null \
 
 pip install -r requirements.txt
 
-# ── 5.  CUDA / cuDNN check ────────────────────────────────────────────────────
+# ── 5.  CUDA / cuDNN check + install ─────────────────────────────────────────
 echo ""
 echo "  Checking GPU availability..."
 if command -v nvidia-smi &>/dev/null; then
   nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader
   echo ""
-  echo "  GPU found.  faster-whisper will use CUDA (float16)."
-  echo "  Ensure CUDA 11.x/12.x and cuDNN 8.x/9.x are installed."
-  echo "  Install with:"
-  echo "    pip install nvidia-cublas-cu12 nvidia-cudnn-cu12"
-  echo "  OR follow: https://docs.nvidia.com/cuda/cuda-installation-guide-linux/"
+  echo "  GPU found.  Installing CUDA 12 runtime libraries via pip..."
+  echo "  (This installs the correct .so files without requiring a system CUDA install.)"
+  echo "  Your NVIDIA driver must be >= 525.  Run 'nvidia-smi' to verify."
+  echo ""
+  pip install "nvidia-cublas-cu12>=12.3.0" "nvidia-cudnn-cu12>=9.0.0,<10"
+  echo ""
+  echo "  CUDA libraries installed.  faster-whisper will use GPU float16."
+  echo ""
+  echo "  Model: large-v3-turbo  (~2.5 GB VRAM, ~3x faster than large-v3)"
+  echo "  To change model size, edit WHISPER_MODEL in config.py"
 else
   echo "  No NVIDIA GPU detected.  Transcription will run on CPU."
   echo "  Edit config.py and set:"
   echo "    WHISPER_DEVICE = 'cpu'"
   echo "    WHISPER_COMPUTE_TYPE = 'int8'"
+  echo "    WHISPER_MODEL = 'small.en'  (faster on CPU)"
 fi
 
 # ── 6.  Create required directories ──────────────────────────────────────────

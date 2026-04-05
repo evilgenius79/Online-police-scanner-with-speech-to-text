@@ -56,11 +56,13 @@ PRE_ROLL_FRAMES = 17
 POST_ROLL_FRAMES = 10
 
 # ─── Whisper Speech-to-Text ───────────────────────────────────────────────────
-# Model size: "large-v3" gives best accuracy. Other options:
-#   "medium.en"  - faster, good accuracy, English only
-#   "small.en"   - even faster, decent accuracy
-#   "large-v3"   - best accuracy, requires ~6GB VRAM (fits on RTX 4060)
-WHISPER_MODEL = "large-v3"
+# Model size options:
+#   "large-v3-turbo"  - RECOMMENDED: distilled large-v3, 3x faster, ~2.5 GB VRAM,
+#                       near-identical accuracy for English. Best choice for RTX 4060.
+#   "large-v3"        - Maximum accuracy, ~10 GB VRAM (tight on RTX 4060)
+#   "medium.en"       - Faster, good accuracy, English-only, ~5 GB VRAM
+#   "small.en"        - Even faster, decent accuracy, ~2 GB VRAM
+WHISPER_MODEL = "large-v3-turbo"
 
 # Device: "cuda" for GPU (RTX 4060), "cpu" for CPU fallback
 WHISPER_DEVICE = "cuda"
