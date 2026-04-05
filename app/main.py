@@ -17,6 +17,7 @@ import os
 import queue
 import re
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
@@ -40,9 +41,46 @@ transcription_queue: queue.Queue = queue.Queue(maxsize=200)
 
 BASE_DIR = Path(__file__).parent.parent
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Lifecycle  (lifespan replaces the deprecated @on_event decorator)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """Run startup tasks, yield control to the application, then shut down."""
+    # ── Startup ───────────────────────────────────────────────────────────────
+    database.init_db(str(config.DB_PATH))
+
+    # Store the running event loop so background threads can schedule callbacks.
+    loop = asyncio.get_running_loop()
+    broadcaster.set_loop(loop)
+
+    audio_capture.configure(transcription_queue, broadcaster)
+    transcriber.configure(broadcaster)
+
+    transcriber.start(transcription_queue)
+
+    try:
+        audio_capture.start()
+    except Exception as exc:
+        # Keep the web interface alive for browsing past clips even if the
+        # audio device is unavailable.
+        logger.error("Audio capture could not start: %s", exc)
+
+    logger.info("Scanner server ready at http://%s:%d", config.HOST, config.PORT)
+
+    yield   # ── Application runs here ─────────────────────────────────────────
+
+    # ── Shutdown ──────────────────────────────────────────────────────────────
+    audio_capture.stop()
+    transcriber.stop()
+
+
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 app = FastAPI(
     title="Police Scanner",
+    lifespan=_lifespan,
     # Disable auto-generated API docs to reduce attack surface on a local server.
     docs_url=None,
     redoc_url=None,
@@ -60,43 +98,6 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Lifecycle
-# ─────────────────────────────────────────────────────────────────────────────
-
-@app.on_event("startup")
-async def _startup() -> None:
-    # Initialise database.
-    database.init_db(str(config.DB_PATH))
-
-    # Give the broadcaster the running event loop so that background threads
-    # can safely schedule puts into asyncio.Queue objects.
-    loop = asyncio.get_running_loop()
-    broadcaster.set_loop(loop)
-
-    # Wire dependencies.
-    audio_capture.configure(transcription_queue, broadcaster)
-    transcriber.configure(broadcaster)
-
-    # Start workers.
-    transcriber.start(transcription_queue)
-
-    try:
-        audio_capture.start()
-    except Exception as exc:
-        # Let the web interface start even if audio capture fails so the user
-        # can at least browse past clips and check the status page.
-        logger.error("Audio capture could not start: %s", exc)
-
-    logger.info("Scanner server ready at http://%s:%d", config.HOST, config.PORT)
-
-
-@app.on_event("shutdown")
-async def _shutdown() -> None:
-    audio_capture.stop()
-    transcriber.stop()
 
 
 # ─────────────────────────────────────────────────────────────────────────────

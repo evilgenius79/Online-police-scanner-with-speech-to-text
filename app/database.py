@@ -199,7 +199,7 @@ def search_clips(
                FROM clips c
                JOIN clips_fts ON clips_fts.rowid = c.id
                WHERE clips_fts MATCH ?
-               ORDER BY rank
+               ORDER BY clips_fts.rank
                LIMIT ? OFFSET ?""",
             (fts_query, per_page, offset),
         ).fetchall()
@@ -228,6 +228,17 @@ def search_clips(
         "per_page": per_page,
         "pages": math.ceil(total / per_page) if total > 0 else 0,
     }
+
+
+def delete_clip(clip_id: int) -> None:
+    """
+    Delete a clip record by ID.
+    The FTS5 DELETE trigger removes it from the search index automatically.
+    Called from the transcription thread when Whisper finds no speech.
+    """
+    conn = _get_conn()
+    conn.execute("DELETE FROM clips WHERE id = ?", (clip_id,))
+    conn.commit()
 
 
 def get_dates() -> list:

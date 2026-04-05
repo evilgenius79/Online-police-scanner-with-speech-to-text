@@ -352,6 +352,10 @@ async function loadDates() {
     allBtn.innerHTML = '<span>All dates</span>';
     allBtn.addEventListener('click', () => {
       currentDate = null;
+      isSearching = false;
+      document.getElementById('search-input').value = '';
+      document.getElementById('btn-clear-search').style.display = 'none';
+      document.getElementById('clips-title').textContent = 'Recent Transmissions';
       setActiveDateBtn(allBtn);
       loadClips(1, null);
     });
@@ -548,13 +552,22 @@ function buildClipCard(clip) {
 function prependClip(clip) {
   const list = document.getElementById('clips-list');
 
-  // Remove "no transmissions" placeholder if present
+  // Remove "no transmissions" placeholder if present.
   const empty = list.querySelector('.empty-msg');
   if (empty) empty.remove();
 
+  // buildClipCard() returns the <article class="clip-card"> element itself,
+  // so we add the highlight class directly — NOT via querySelector('.clip-card')
+  // which would search descendants and return null.
   const card = buildClipCard(clip);
-  card.querySelector('.clip-card').classList.add('clip-card--new');
+  card.classList.add('clip-card--new');
   list.prepend(card);
+
+  // Refresh the clip count display.
+  const countEl = document.getElementById('clips-count');
+  const current = parseInt(countEl.textContent) || 0;
+  const next = current + 1;
+  countEl.textContent = `${next.toLocaleString()} clip${next !== 1 ? 's' : ''}`;
 }
 
 function updateTranscriptInDom(clipId, transcript) {

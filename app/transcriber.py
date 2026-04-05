@@ -95,22 +95,39 @@ def _worker() -> None:
         try:
             transcript = _transcribe(audio_path)
 
-            # Update DB (imports database here to avoid circular-import at
-            # module load time since database.py imports nothing from this file).
-            from app.database import update_transcript
+            # Lazy imports avoid circular-import at module load time.
+            from app.database import delete_clip, update_transcript
+
+            if not transcript:
+                # Whisper found no speech — delete the file and DB record.
+                # This satisfies the requirement that only speech-containing
+                # clips are kept on disk.
+                try:
+                    import os
+                    os.remove(audio_path)
+                except OSError:
+                    pass
+                delete_clip(clip_id)
+                logger.debug("Clip %d: no speech – file and record deleted", clip_id)
+                continue
+
+            # Speech confirmed — persist the transcript.
             update_transcript(clip_id, transcript)
+            logger.info("Clip %d: %s", clip_id, transcript[:120])
 
-            if transcript:
-                logger.info("Clip %d: %s", clip_id, transcript[:120])
-            else:
-                logger.debug("Clip %d: no speech detected by Whisper", clip_id)
-
-            # Push the transcript to connected WebSocket clients.
+            # Now broadcast new_clip with the transcript already attached.
+            # Clients never see a clip before its transcript is ready.
             if _broadcaster is not None:
                 _broadcaster.broadcast_event({
-                    "type": "transcript_ready",
-                    "clip_id": clip_id,
-                    "transcript": transcript,
+                    "type": "new_clip",
+                    "clip": {
+                        "id": clip_id,
+                        "filename": item["filename"],
+                        "start_time": item["start_time"],
+                        "duration": round(item["duration"], 2),
+                        "transcript": transcript,
+                        "audio_url": f"/audio/{item['filename']}",
+                    },
                 })
 
         except Exception:
@@ -133,16 +150,18 @@ def _load_model():
 
     # Log expected VRAM requirements so the user knows what to expect.
     vram_table = {
-        "tiny":     "~1 GB",
-        "tiny.en":  "~1 GB",
-        "base":     "~1 GB",
-        "base.en":  "~1 GB",
-        "small":    "~2 GB",
-        "small.en": "~2 GB",
-        "medium":   "~5 GB",
-        "medium.en":"~5 GB",
-        "large-v2": "~10 GB",
-        "large-v3": "~10 GB",
+        "tiny":           "~1 GB",
+        "tiny.en":        "~1 GB",
+        "base":           "~1 GB",
+        "base.en":        "~1 GB",
+        "small":          "~2 GB",
+        "small.en":       "~2 GB",
+        "medium":         "~5 GB",
+        "medium.en":      "~5 GB",
+        "large-v2":       "~10 GB",
+        "large-v3":       "~10 GB",
+        "large-v3-turbo": "~2.5 GB",   # distilled; default model
+        "turbo":          "~2.5 GB",
     }
     vram = vram_table.get(config.WHISPER_MODEL, "unknown")
     logger.info(

@@ -3,7 +3,6 @@ Police Scanner Configuration
 Edit these values to match your setup.
 Run `python list_devices.py` to find your microphone device index.
 """
-import os
 from pathlib import Path
 
 BASE_DIR = Path(__file__).parent

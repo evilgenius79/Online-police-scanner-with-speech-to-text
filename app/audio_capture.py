@@ -180,10 +180,11 @@ def _audio_callback(indata, frames, time_info, status):
     if status:
         logger.debug("sounddevice status: %s", status)
 
-    # indata: shape (blocksize, channels), dtype float32, range [-1, 1]
-    mono = indata[:, 0]
-    # Clip before scaling to avoid int16 overflow from rare out-of-range samples.
-    np.clip(mono, -1.0, 1.0, out=mono)
+    # indata: shape (blocksize, channels), dtype float32, range [-1, 1].
+    # PortAudio provides indata as a read-only buffer on some platforms, so we
+    # must NOT use out=indata[:, 0] or any other in-place write on it.
+    # np.clip without `out` always returns a new array — safe here.
+    mono = np.clip(indata[:, 0], -1.0, 1.0)
     pcm = (mono * 32767.0).astype(np.int16)
 
     try:
@@ -373,6 +374,9 @@ def _save_clip(frames: list, start_time: datetime) -> None:
         logger.info("Saved clip %d: %s  (%.1fs)", clip_id, rel_path, duration)
 
         # Enqueue for transcription.
+        # NOTE: the new_clip WebSocket event is sent by the transcriber AFTER
+        # Whisper confirms speech is present.  Clips with no speech are deleted
+        # automatically, so we never broadcast a clip that will disappear.
         if _transcription_queue is not None:
             try:
                 _transcription_queue.put_nowait({
@@ -384,20 +388,6 @@ def _save_clip(frames: list, start_time: datetime) -> None:
                 })
             except queue.Full:
                 logger.warning("Transcription queue full – clip %d will not be transcribed", clip_id)
-
-        # Notify WebSocket clients about the new (not-yet-transcribed) clip.
-        if _broadcaster is not None:
-            _broadcaster.broadcast_event({
-                "type": "new_clip",
-                "clip": {
-                    "id": clip_id,
-                    "filename": rel_path,
-                    "start_time": start_time.isoformat(),
-                    "duration": round(duration, 2),
-                    "transcript": None,
-                    "audio_url": f"/audio/{rel_path}",
-                },
-            })
 
     except Exception:
         logger.exception("Error saving clip")
