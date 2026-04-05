@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Police Scanner</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════════════════════ HEADER ══════ -->
+<header class="site-header">
+  <div class="header-inner">
+    <div class="header-title">
+      <span class="header-icon">&#9632;</span>
+      <h1>Police Scanner</h1>
+    </div>
+    <div class="header-status">
+      <span id="status-dot" class="status-dot status-dot--offline"></span>
+      <span id="status-label" class="status-label">Connecting…</span>
+    </div>
+  </div>
+</header>
+
+<main class="main-grid">
+
+  <!-- ══════════════════════════════════════════ LEFT COLUMN ══════════════ -->
+  <aside class="sidebar">
+
+    <!-- Live audio card -->
+    <section class="card card--live" id="card-live">
+      <div class="card-header">
+        <span class="card-title">Live Audio</span>
+        <span id="live-badge" class="badge badge--off">OFF AIR</span>
+      </div>
+
+      <!-- Frequency-spectrum visualiser canvas -->
+      <canvas id="visualizer" class="visualizer" width="360" height="72"
+              aria-label="Audio frequency spectrum"></canvas>
+
+      <!-- Transmission indicator bar -->
+      <div id="tx-bar" class="tx-bar tx-bar--silent">
+        <span id="tx-label">MONITORING</span>
+      </div>
+
+      <div class="live-controls">
+        <button id="btn-connect" class="btn btn--primary"
+                onclick="App.toggleAudio()">Connect Audio</button>
+        <label class="volume-label">
+          Vol
+          <input id="volume" type="range" min="0" max="1" step="0.05"
+                 value="0.8" oninput="App.setVolume(this.value)"
+                 class="volume-slider" />
+        </label>
+      </div>
+    </section>
+
+    <!-- Scanner stats -->
+    <section class="card card--stats">
+      <div class="stat-row">
+        <span class="stat-label">Total clips</span>
+        <span id="stat-total" class="stat-value">—</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Pending STT</span>
+        <span id="stat-pending" class="stat-value">—</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">WS clients</span>
+        <span id="stat-clients" class="stat-value">—</span>
+      </div>
+      <div class="stat-row">
+        <span class="stat-label">Model loaded</span>
+        <span id="stat-model" class="stat-value">—</span>
+      </div>
+    </section>
+
+    <!-- Date browser -->
+    <section class="card card--dates">
+      <div class="card-header">
+        <span class="card-title">Browse by Date</span>
+      </div>
+      <div id="date-list" class="date-list">
+        <p class="empty-msg">Loading dates…</p>
+      </div>
+    </section>
+
+  </aside>
+
+  <!-- ══════════════════════════════════════════ MAIN COLUMN ═════════════ -->
+  <section class="content-col">
+
+    <!-- Search bar -->
+    <div class="search-bar">
+      <input id="search-input" type="search" class="search-input"
+             placeholder="Search transcripts…"
+             autocomplete="off" spellcheck="false"
+             oninput="App.onSearchInput()"
+             onkeydown="if(event.key==='Enter') App.doSearch()"
+             maxlength="500" />
+      <button class="btn btn--search" onclick="App.doSearch()">Search</button>
+      <button class="btn btn--ghost" id="btn-clear-search"
+              onclick="App.clearSearch()" style="display:none">Clear</button>
+    </div>
+
+    <!-- Clips header -->
+    <div class="clips-header">
+      <h2 id="clips-title" class="clips-title">Recent Transmissions</h2>
+      <span id="clips-count" class="clips-count"></span>
+    </div>
+
+    <!-- Clips list -->
+    <div id="clips-list" class="clips-list">
+      <p class="empty-msg">Loading…</p>
+    </div>
+
+    <!-- Pagination -->
+    <nav id="pagination" class="pagination" aria-label="Clips pagination"></nav>
+
+  </section>
+
+</main>
+
+<!-- ════════════════════════════════════════════════ CLIP CARD TEMPLATE ════ -->
+<!-- Used by JavaScript to stamp out clip cards. -->
+<template id="clip-card-tpl">
+  <article class="clip-card" data-id="">
+    <div class="clip-meta">
+      <time class="clip-time"></time>
+      <span class="clip-duration"></span>
+    </div>
+    <div class="clip-transcript">
+      <p class="transcript-text"></p>
+      <p class="transcript-pending hidden">Transcribing…</p>
+    </div>
+    <audio class="clip-audio" controls preload="none"></audio>
+  </article>
+</template>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>
