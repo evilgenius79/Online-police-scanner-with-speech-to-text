@@ -23,14 +23,15 @@ Streams live audio to your browser, saves every transmission as a clip, and tran
 |---|---|
 | GPU | NVIDIA RTX 4060 (8 GB VRAM) or better |
 | CPU | Any modern x86-64 (i7-12650H or equivalent) |
-| Audio | Uniden scanner → laptop mic/line-in jack |
-| OS | Ubuntu 22.04+ / Debian 12+ (Windows via WSL2 also works) |
+| Audio | Uniden scanner → USB audio adapter or mic/line-in jack |
+| OS | Ubuntu 22.04+ / Debian 12+ / Windows 10 or 11 |
 
 | Software | Version |
 |---|---|
-| Python | 3.10, 3.11, or 3.12 |
+| Python | 3.10 or later |
 | NVIDIA driver | ≥ 525 (ships with CUDA 12) |
 | Browser | Chrome, Edge, or Firefox (Web Audio API + AudioWorklet required) |
+| **Windows only** | [Git Bash](https://git-scm.com/downloads) — required to run `setup.sh` and activate the venv |
 
 ---
 
@@ -46,11 +47,6 @@ cd Online-police-scanner-with-speech-to-text
 bash setup.sh
 
 # 3. Find your scanner's audio device index
-#    Linux / macOS / WSL:
-source venv/bin/activate
-#    Windows (Git Bash):
-source venv/Scripts/activate
-
 python list_devices.py
 ```
 
@@ -69,20 +65,17 @@ Available audio INPUT devices:
 # 4. Edit config.py – set your device index
 #    Change:  AUDIO_DEVICE_INDEX = None
 #    To:      AUDIO_DEVICE_INDEX = 1   (or whatever index your scanner shows as)
-#    Open it in any text editor:
-#      Windows:       notepad config.py   (or open in VS Code / Notepad++)
-#      Linux / macOS: nano config.py
+#    Open config.py in any text editor (Notepad, VS Code, nano, etc.)
 
-# 5. Activate the venv and start the server
-#    Git Bash / MSYS2:  source venv/Scripts/activate
-#    PowerShell:        venv\Scripts\Activate.ps1
-#    Command Prompt:    venv\Scripts\activate.bat
-#    Linux / macOS:     source venv/bin/activate
+# 5. Start the server
 python run.py
 ```
 
 Open **http://localhost:8000** in your browser.  
 Click **Connect Audio** – you should hear the scanner live.
+
+> **Windows users:** run all commands in **Git Bash** (installed with [Git for Windows](https://git-scm.com/downloads)).  
+> The venv stays active for the whole Git Bash session after `setup.sh` runs, so steps 3–5 above work as-is without re-activating.
 
 ---
 
