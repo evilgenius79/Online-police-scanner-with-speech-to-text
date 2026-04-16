@@ -69,9 +69,15 @@ Available audio INPUT devices:
 # 4. Edit config.py – set your device index
 #    Change:  AUDIO_DEVICE_INDEX = None
 #    To:      AUDIO_DEVICE_INDEX = 1   (or whatever index your scanner shows as)
-nano config.py
+#    Open it in any text editor:
+#      Windows:       notepad config.py   (or open in VS Code / Notepad++)
+#      Linux / macOS: nano config.py
 
-# 5. Start the server
+# 5. Activate the venv and start the server
+#    Git Bash / MSYS2:  source venv/Scripts/activate
+#    PowerShell:        venv\Scripts\Activate.ps1
+#    Command Prompt:    venv\Scripts\activate.bat
+#    Linux / macOS:     source venv/bin/activate
 python run.py
 ```
 
