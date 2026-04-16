@@ -10,7 +10,7 @@ Streams live audio to your browser, saves every transmission as a clip, and tran
 - **Live audio** – scanner audio streams to your browser in near-realtime via WebSocket
 - **Spectrum visualiser** – frequency display shows when a transmission is active
 - **Auto clip saving** – Voice Activity Detection captures each transmission as a `.wav` file
-- **GPU speech-to-text** – OpenAI Whisper `large-v3-turbo` on CUDA for maximum accuracy
+- **GPU speech-to-text** – OpenAI Whisper `large-v3` on CUDA for maximum accuracy, with automatic cascade to smaller models on CUDA OOM
 - **Full-text search** – search all transcripts instantly (SQLite FTS5)
 - **Date browser** – browse clips from any past day
 - **Real-time updates** – new clips and transcripts appear live without refreshing the page
@@ -85,13 +85,36 @@ All settings are in `config.py`.  The most important ones:
 AUDIO_DEVICE_INDEX = None    # None = system default; set to int from list_devices.py
 
 # ── Speech-to-text model ──────────────────────────────────────────────────────
-WHISPER_MODEL = "large-v3-turbo"   # best accuracy/speed balance on RTX 4060
-# WHISPER_MODEL = "medium.en"      # faster, less accurate
-# WHISPER_MODEL = "large-v3"       # maximum accuracy, needs full 8 GB VRAM
+# WHISPER_MODEL sets the *starting point* of an automatic cascade.
+# If this model causes a CUDA out-of-memory error, the app retries with the
+# next smaller option automatically — no manual intervention needed.
+WHISPER_MODEL = "large-v3"         # best quality, ~5 GB VRAM (default for RTX 4060)
+# WHISPER_MODEL = "large-v3-turbo" # 3× faster distilled model, ~2.5 GB VRAM
+# WHISPER_MODEL = "medium.en"      # good quality, ~3 GB VRAM
 
 # ── VAD sensitivity ───────────────────────────────────────────────────────────
 VAD_AGGRESSIVENESS = 2       # 0 (least) – 3 (most aggressive noise rejection)
 SILENCE_FRAMES_END = 67      # frames of silence (×30 ms) before clip ends (~2 s)
+```
+
+### Automatic model cascade
+
+On startup the transcriber tries to load `WHISPER_MODEL` at `float16` precision.  If a CUDA out-of-memory error occurs it automatically steps down through this chain until something fits:
+
+```
+large-v3 float16       (~5 GB)   ← default starting point for RTX 4060
+large-v3 int8_float16  (~3.5 GB)
+large-v3-turbo float16 (~2.5 GB)
+large-v3-turbo int8_float16 (~1.5 GB)
+medium.en float16/int8_float16
+small.en  float16/int8_float16
+──── CPU fallback ────
+small.en int8 → base.en int8 → tiny.en int8
+```
+
+You will see the chosen model logged at startup:
+```
+Whisper loaded: 'large-v3' on cuda/float16
 ```
 
 ### VAD tuning
@@ -103,14 +126,17 @@ SILENCE_FRAMES_END = 67      # frames of silence (×30 ms) before clip ends (~2 
 | Clips split mid-sentence | Raise `SILENCE_FRAMES_END` (e.g. `100` = ~3 s) |
 | Clips include too much dead air | Lower `SILENCE_FRAMES_END` |
 
-### CPU fallback (no GPU)
+### Forcing CPU mode (no GPU)
+
+To skip GPU entirely (e.g. on an SBC or machine without CUDA):
 
 ```python
 # In config.py:
-WHISPER_DEVICE       = "cpu"
-WHISPER_COMPUTE_TYPE = "int8"
-WHISPER_MODEL        = "small.en"   # large-v3-turbo is too slow on CPU
+WHISPER_DEVICE = "cpu"
+WHISPER_MODEL  = "small.en"   # large models are too slow on CPU
 ```
+
+The cascade still applies on CPU: if the configured model exceeds RAM it will try `small.en → base.en → tiny.en` automatically.
 
 ---
 
@@ -181,6 +207,7 @@ sounddevice InputStream (16 kHz, mono, 30 ms frames)
 - **Pre-roll:** 0.5 s of audio before VAD triggers is prepended to every clip so the first syllable is never cut off
 - **Post-roll:** 0.3 s of silence is kept after the last speech frame
 - **Live stream:** raw 16-bit PCM is sent as binary WebSocket frames → browser AudioWorklet converts Int16 → Float32 and plays continuously
+- **WebSocket limit:** maximum 20 simultaneous browser connections (configurable via `_WS_MAX_CLIENTS` in `app/main.py`)
 
 ### Whisper configuration
 
@@ -273,16 +300,34 @@ find clips/ -mindepth 1 -maxdepth 1 -type d -mtime +30 -exec rm -rf {} +
 - Lower `no_speech_threshold` in `transcriber.py` (default `0.6`); try `0.4`
 
 **"CUDA out of memory" error**
-- Switch to a smaller model: `WHISPER_MODEL = "medium.en"` in `config.py`
-- Or use `WHISPER_COMPUTE_TYPE = "int8_float16"` to reduce VRAM by ~1 GB
+- The cascade handles this automatically — the app logs which model it fell back to.
+- If you want to lock in a specific smaller model to avoid the OOM entirely, set `WHISPER_MODEL = "large-v3-turbo"` in `config.py` (uses ~2.5 GB VRAM).
+- If other GPU processes (games, other ML apps) are running alongside, they reduce available VRAM and may push the cascade further down.
 
 **Whisper model download is slow / fails**
-- The `large-v3-turbo` model is ~1.5 GB.  It downloads to `models/` on first run.
-- If the download fails, delete the partial file in `models/` and restart
+- `large-v3` is ~3 GB and downloads to `models/` on first run.  `large-v3-turbo` is ~1.5 GB.
+- If the download fails mid-way, delete the partial folder inside `models/` and restart.
 
 **`webrtcvad-wheels` fails to install**
 - Try: `pip install webrtcvad` instead (requires `python3-dev` and `gcc`)
 - The app falls back to energy-only VAD if webrtcvad is unavailable — it will still work
+
+---
+
+## Security Notes
+
+This app is designed for **local network use only** and is not hardened for public internet exposure.  The following protections are in place:
+
+| Protection | Detail |
+|---|---|
+| Path traversal prevention | Audio file requests validate `YYYY-MM-DD` date format + filename regex + `Path.resolve().relative_to()` hard check |
+| FTS5 injection prevention | Search queries are wrapped in escaped double-quotes before reaching SQLite FTS5 |
+| LIKE wildcard escaping | The search fallback path escapes `%` and `_` so user input is always a literal substring |
+| CORS restricted to GET | No POST/PUT/DELETE methods are exposed across origins |
+| WebSocket connection cap | Maximum 20 simultaneous WS clients; excess connections receive `1008 Policy Violation` |
+| No API docs exposed | `/docs`, `/redoc`, and `/openapi.json` are all disabled |
+
+**Do not expose port 8000 directly to the internet.**  If you need remote access, put it behind a reverse proxy (nginx/Caddy) with authentication.
 
 ---
 
