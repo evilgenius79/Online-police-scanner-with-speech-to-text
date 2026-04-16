@@ -46,7 +46,11 @@ cd Online-police-scanner-with-speech-to-text
 bash setup.sh
 
 # 3. Find your scanner's audio device index
+#    Linux / macOS / WSL:
 source venv/bin/activate
+#    Windows (Git Bash):
+source venv/Scripts/activate
+
 python list_devices.py
 ```
 
