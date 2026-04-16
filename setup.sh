@@ -5,7 +5,14 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-PYTHON=${PYTHON:-python3}
+# On Windows 'python3' is often not in PATH — try it first, fall back to 'python'.
+if [ -z "${PYTHON:-}" ]; then
+  if command -v python3 &>/dev/null; then
+    PYTHON=python3
+  elif command -v python &>/dev/null; then
+    PYTHON=python
+  fi
+fi
 
 echo ""
 echo "  Police Scanner – setup"
@@ -14,7 +21,7 @@ echo ""
 # ── 1.  Python version check ──────────────────────────────────────────────────
 PY_VER=$($PYTHON -c "import sys; print(sys.version_info[:2])" 2>/dev/null || echo "")
 if [ -z "$PY_VER" ]; then
-  echo "ERROR: python3 not found.  Install Python 3.10 or later."
+  echo "ERROR: Python not found.  Install Python 3.10 or later and add it to PATH."
   exit 1
 fi
 echo "  Python: $($PYTHON --version)"
@@ -38,7 +45,11 @@ fi
 source "$ACTIVATE"
 echo "  Activated: $(which python)"
 
-pip install --upgrade pip --quiet
+# Use 'python -m pip' throughout — works correctly on both Windows and Linux,
+# and avoids the Windows restriction on upgrading pip via the pip executable itself.
+PIP="python -m pip"
+
+$PIP install --upgrade pip --quiet
 
 # ── 3.  System audio library (PortAudio, required by sounddevice) ─────────────
 #  On Ubuntu/Debian:
@@ -58,11 +69,11 @@ echo "  Installing Python packages..."
 
 # First try webrtcvad-wheels (pre-built wheel, works on Python 3.10-3.12).
 # Fall back to the original webrtcvad if wheels are not available for this platform.
-pip install webrtcvad-wheels 2>/dev/null \
-  || pip install webrtcvad \
+$PIP install webrtcvad-wheels 2>/dev/null \
+  || $PIP install webrtcvad \
   || echo "  WARNING: webrtcvad could not be installed; energy-only VAD will be used."
 
-pip install -r requirements.txt
+$PIP install -r requirements.txt
 
 # ── 5.  CUDA / cuDNN check + install ─────────────────────────────────────────
 echo ""
@@ -74,7 +85,7 @@ if command -v nvidia-smi &>/dev/null; then
   echo "  (This installs the correct .so files without requiring a system CUDA install.)"
   echo "  Your NVIDIA driver must be >= 525.  Run 'nvidia-smi' to verify."
   echo ""
-  pip install "nvidia-cublas-cu12>=12.3.0" "nvidia-cudnn-cu12>=9.0.0,<10"
+  $PIP install "nvidia-cublas-cu12>=12.3.0" "nvidia-cudnn-cu12>=9.0.0,<10"
   echo ""
   echo "  CUDA libraries installed.  faster-whisper will try large-v3 (float16) first."
   echo "  If VRAM is tight it will automatically fall back to a smaller model."
