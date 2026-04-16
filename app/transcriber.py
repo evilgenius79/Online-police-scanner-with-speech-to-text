@@ -13,6 +13,7 @@ GPU is never called concurrently.  The transcription_queue is a
 threading.Queue filled by the audio capture worker.
 """
 import logging
+import os
 import queue
 import threading
 from pathlib import Path
@@ -103,7 +104,6 @@ def _worker() -> None:
                 # This satisfies the requirement that only speech-containing
                 # clips are kept on disk.
                 try:
-                    import os
                     os.remove(audio_path)
                 except OSError:
                     pass
@@ -135,54 +135,149 @@ def _worker() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Model loading
+# Model loading  –  automatic CUDA OOM cascade
 # ─────────────────────────────────────────────────────────────────────────────
+
+# VRAM estimates for float16 inference on GPU (weights + activation overhead).
+_VRAM_TABLE: dict[str, str] = {
+    "tiny":            "~1 GB",
+    "tiny.en":         "~1 GB",
+    "base":            "~1 GB",
+    "base.en":         "~1 GB",
+    "small":           "~2 GB",
+    "small.en":        "~2 GB",
+    "medium":          "~3 GB",
+    "medium.en":       "~3 GB",
+    "large-v2":        "~5 GB",
+    "large-v3":        "~5 GB",   # float16; fits comfortably on RTX 4060 (8 GB)
+    "large-v3-turbo":  "~2.5 GB", # distilled large-v3; 3× faster, near same accuracy
+    "turbo":           "~2.5 GB",
+    "distil-large-v3": "~4 GB",
+}
+
+# CUDA model cascade — ordered from best quality to smallest.
+# The loader starts at the entry that matches config.WHISPER_MODEL and walks
+# forward only if a CUDA out-of-memory error occurs.
+_CUDA_CHAIN: list[tuple[str, str]] = [
+    ("large-v3",        "float16"),        # ~5 GB  ← ideal for RTX 4060
+    ("large-v3",        "int8_float16"),   # ~3.5 GB — same weights, int8 matmuls
+    ("large-v3-turbo",  "float16"),        # ~2.5 GB — 3× faster distilled model
+    ("large-v3-turbo",  "int8_float16"),   # ~1.5 GB
+    ("medium.en",       "float16"),        # ~3 GB
+    ("medium.en",       "int8_float16"),   # ~1.5 GB
+    ("small.en",        "float16"),        # ~1 GB
+    ("small.en",        "int8_float16"),   # ~0.5 GB
+]
+
+# Last-resort CPU chain (no CUDA required).
+_CPU_CHAIN: list[tuple[str, str]] = [
+    ("small.en", "int8"),
+    ("base.en",  "int8"),
+    ("tiny.en",  "int8"),
+]
+
+
+def _is_oom_error(exc: Exception) -> bool:
+    """Return True if the exception looks like a CUDA out-of-memory error."""
+    msg = str(exc).lower()
+    return any(kw in msg for kw in (
+        "out of memory",
+        "cudaoutofmemory",
+        "cuda error",
+        "insufficient memory",
+        "cannot allocate",
+        "allocation failed",
+        "memory pool",
+    ))
+
 
 def _load_model():
     """
-    Load the faster-whisper model onto the GPU.
+    Load the fastest/largest Whisper model that fits in GPU memory.
 
-    Configuration is read from config.py so the user can easily switch models
-    or fall back to CPU by changing WHISPER_DEVICE = "cpu".
+    Starting from the model specified in config.WHISPER_MODEL, the loader
+    walks down _CUDA_CHAIN (largest → smallest) and retries on every CUDA
+    out-of-memory error.  If all CUDA options are exhausted it falls back to
+    CPU inference via _CPU_CHAIN.
+
+    Non-memory errors (bad install, wrong path, etc.) are re-raised immediately
+    so the operator sees a clear error rather than a silent downgrade.
     """
     import config
     from faster_whisper import WhisperModel
 
-    # Log expected VRAM requirements so the user knows what to expect.
-    vram_table = {
-        "tiny":           "~1 GB",
-        "tiny.en":        "~1 GB",
-        "base":           "~1 GB",
-        "base.en":        "~1 GB",
-        "small":          "~2 GB",
-        "small.en":       "~2 GB",
-        "medium":         "~5 GB",
-        "medium.en":      "~5 GB",
-        "large-v2":       "~10 GB",
-        "large-v3":       "~10 GB",
-        "large-v3-turbo": "~2.5 GB",   # distilled; default model
-        "turbo":          "~2.5 GB",
-    }
-    vram = vram_table.get(config.WHISPER_MODEL, "unknown")
-    logger.info(
-        "Loading Whisper model '%s' on %s (%s) – VRAM: %s",
-        config.WHISPER_MODEL,
-        config.WHISPER_DEVICE,
-        config.WHISPER_COMPUTE_TYPE,
-        vram,
-    )
+    def _try(model_name: str, device: str, compute_type: str) -> "WhisperModel":
+        vram = _VRAM_TABLE.get(model_name, "?")
+        logger.info(
+            "Trying Whisper '%s' on %s/%s  (VRAM ≈ %s)",
+            model_name, device, compute_type, vram,
+        )
+        return WhisperModel(
+            model_name,
+            device=device,
+            compute_type=compute_type,
+            download_root=str(config.MODELS_DIR),
+            cpu_threads=0,
+            num_workers=1,
+        )
 
-    model = WhisperModel(
-        config.WHISPER_MODEL,
-        device=config.WHISPER_DEVICE,
-        compute_type=config.WHISPER_COMPUTE_TYPE,
-        download_root=str(config.MODELS_DIR),
-        # Use all available CPU cores for pre/post-processing.
-        cpu_threads=0,
-        num_workers=1,
-    )
-    logger.info("Whisper model loaded")
-    return model
+    # ── CUDA path ─────────────────────────────────────────────────────────────
+    if config.WHISPER_DEVICE == "cuda":
+        # Find the configured model's position in the chain so we start there
+        # (skip larger models that the user deliberately didn't configure).
+        start_idx = next(
+            (i for i, (m, _) in enumerate(_CUDA_CHAIN)
+             if m == config.WHISPER_MODEL),
+            0,   # unknown model → start from the top
+        )
+
+        for model_name, compute_type in _CUDA_CHAIN[start_idx:]:
+            try:
+                model = _try(model_name, "cuda", compute_type)
+                logger.info(
+                    "Whisper loaded: '%s' on cuda/%s", model_name, compute_type,
+                )
+                return model
+            except Exception as exc:
+                if _is_oom_error(exc):
+                    logger.warning(
+                        "CUDA OOM for '%s' %s – trying next option",
+                        model_name, compute_type,
+                    )
+                    continue
+                # Non-memory error: propagate so the operator sees it.
+                raise
+
+        logger.warning(
+            "All CUDA options exhausted (RTX 4060 VRAM full or CUDA unavailable) "
+            "– falling back to CPU inference"
+        )
+
+    # ── CPU path ──────────────────────────────────────────────────────────────
+    # Use the configured model if device=cpu was set explicitly, otherwise use
+    # the CPU chain which starts at small.en (good quality / low RAM).
+    if config.WHISPER_DEVICE == "cpu":
+        try:
+            model = _try(config.WHISPER_MODEL, "cpu", "int8")
+            logger.info("Whisper loaded: '%s' on cpu/int8", config.WHISPER_MODEL)
+            return model
+        except Exception as exc:
+            if not _is_oom_error(exc):
+                raise
+            logger.warning("OOM loading configured CPU model – using CPU chain")
+
+    for model_name, compute_type in _CPU_CHAIN:
+        try:
+            model = _try(model_name, "cpu", compute_type)
+            logger.info("Whisper loaded: '%s' on cpu/%s", model_name, compute_type)
+            return model
+        except Exception as exc:
+            if _is_oom_error(exc):
+                logger.warning("OOM for cpu '%s' – trying smaller", model_name)
+                continue
+            raise
+
+    raise RuntimeError("Failed to load any Whisper model (all options exhausted)")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -92,10 +92,11 @@ app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="stat
 
 # Allow connections from localhost and the LAN IP so other devices on the same
 # network can view the scanner in a browser.
+# Only GET is listed because this API has no mutating POST/PUT/DELETE endpoints.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET"],
     allow_headers=["*"],
 )
 
@@ -227,6 +228,12 @@ async def api_dates() -> list:
 # WebSocket – live audio + events
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Maximum simultaneous WebSocket clients.  Each client gets its own asyncio
+# queue and receives every audio frame; too many connections would exhaust
+# memory and CPU on the broadcaster's call_soon_threadsafe loop.
+_WS_MAX_CLIENTS = 20
+
+
 @app.websocket("/ws/audio")
 async def ws_audio(websocket: WebSocket) -> None:
     """
@@ -238,8 +245,13 @@ async def ws_audio(websocket: WebSocket) -> None:
 
     The client differentiates by checking `event.data instanceof ArrayBuffer`.
     """
-    client_id, q = broadcaster.subscribe()
     await websocket.accept()
+    if broadcaster.client_count() >= _WS_MAX_CLIENTS:
+        await websocket.close(code=1008, reason="Too many connections")
+        logger.warning("WebSocket rejected: client limit (%d) reached", _WS_MAX_CLIENTS)
+        return
+
+    client_id, q = broadcaster.subscribe()
     logger.info("WebSocket client %d connected from %s", client_id, websocket.client)
 
     try:

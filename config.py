@@ -55,21 +55,30 @@ PRE_ROLL_FRAMES = 17
 POST_ROLL_FRAMES = 10
 
 # ─── Whisper Speech-to-Text ───────────────────────────────────────────────────
-# Model size options:
-#   "large-v3-turbo"  - RECOMMENDED: distilled large-v3, 3x faster, ~2.5 GB VRAM,
-#                       near-identical accuracy for English. Best choice for RTX 4060.
-#   "large-v3"        - Maximum accuracy, ~10 GB VRAM (tight on RTX 4060)
-#   "medium.en"       - Faster, good accuracy, English-only, ~5 GB VRAM
-#   "small.en"        - Even faster, decent accuracy, ~2 GB VRAM
-WHISPER_MODEL = "large-v3-turbo"
+# WHISPER_MODEL sets the *starting point* of an automatic cascade.
+# If this model fits in VRAM it is used; if a CUDA out-of-memory error occurs
+# the transcriber automatically tries the next smaller option until one succeeds,
+# then falls back to CPU as a last resort.
+#
+# Model options (quality descending):
+#   "large-v3"        - Maximum accuracy, ~5 GB VRAM (float16).
+#                       Fits comfortably on RTX 4060 (8 GB). CASCADE STARTS HERE.
+#   "large-v3-turbo"  - Distilled large-v3, 3× faster, ~2.5 GB VRAM,
+#                       near-identical accuracy for English.
+#   "medium.en"       - Good accuracy, English-only, ~3 GB VRAM.
+#   "small.en"        - Decent accuracy, ~2 GB VRAM (cascade fallback).
+WHISPER_MODEL = "large-v3"
 
-# Device: "cuda" for GPU (RTX 4060), "cpu" for CPU fallback
+# Device: "cuda" for GPU (RTX 4060), "cpu" to skip GPU entirely.
+# On CUDA OOM the transcriber automatically retries with smaller models
+# before giving up and switching to CPU — no manual intervention needed.
 WHISPER_DEVICE = "cuda"
 
 # Compute type for CUDA:
-#   "float16"  - fast, accurate, recommended for RTX 4060
-#   "int8_float16" - slightly faster, minimal quality loss
-#   "int8"     - CPU only
+#   "float16"      - best quality, recommended for RTX 4060
+#   "int8_float16" - int8 weights + float16 compute; slightly faster,
+#                    minimal quality loss (used automatically as fallback)
+#   "int8"         - CPU only
 WHISPER_COMPUTE_TYPE = "float16"
 
 # Force English transcription (scanner audio is almost always English)

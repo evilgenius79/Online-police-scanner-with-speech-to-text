@@ -15,7 +15,7 @@
 /* ═══════════════════════════════════════════════════════════════
    Configuration
 ═══════════════════════════════════════════════════════════════ */
-const WS_URL     = `ws://${location.host}/ws/audio`;
+const WS_URL     = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/audio`;
 const API_BASE   = '/api';
 const SAMPLE_RATE = 16000;
 const SEARCH_DEBOUNCE_MS = 450;

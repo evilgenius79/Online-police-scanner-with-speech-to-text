@@ -206,16 +206,19 @@ def search_clips(
 
     except sqlite3.OperationalError:
         # FTS5 query syntax error – fall back to LIKE search.
-        like = f"%{query}%"
+        # Escape SQLite LIKE special characters so user input is treated as
+        # a literal substring, not a wildcard pattern.
+        safe = query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        like = f"%{safe}%"
         total = conn.execute(
-            "SELECT COUNT(*) FROM clips WHERE transcript LIKE ?",
+            "SELECT COUNT(*) FROM clips WHERE transcript LIKE ? ESCAPE '\\'",
             (like,),
         ).fetchone()[0]
         rows = conn.execute(
             """SELECT id, filename, start_time, duration, transcript, created_at,
                       transcript AS snippet
                FROM clips
-               WHERE transcript LIKE ?
+               WHERE transcript LIKE ? ESCAPE '\\'
                ORDER BY start_time DESC
                LIMIT ? OFFSET ?""",
             (like, per_page, offset),
