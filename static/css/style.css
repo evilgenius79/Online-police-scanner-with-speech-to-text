@@ -81,6 +81,16 @@ a:hover { text-decoration: underline; }
   color: var(--text-dim);
 }
 
+.admin-link {
+  font-size: 1rem;
+  color: var(--text-dim);
+  text-decoration: none;
+  opacity: .55;
+  transition: opacity .15s;
+  margin-left: .2rem;
+}
+.admin-link:hover { opacity: 1; text-decoration: none; }
+
 /* ── Status dot ──────────────────────────────────────────────────────────────── */
 .status-dot {
   display: inline-block;

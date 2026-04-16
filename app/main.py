@@ -20,7 +20,10 @@ import os
 import queue
 import re
 import secrets
+import subprocess
 import sys
+import threading
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -362,3 +365,139 @@ async def ws_audio(websocket: WebSocket) -> None:
         logger.warning("WebSocket client %d error: %s", client_id, exc)
     finally:
         broadcaster.unsubscribe(client_id)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Admin page + API
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/admin", response_class=HTMLResponse)
+async def admin_page() -> FileResponse:
+    return FileResponse(str(BASE_DIR / "templates" / "admin.html"))
+
+
+@app.get("/api/admin/info")
+async def api_admin_info() -> dict:
+    """Server status + git metadata for the admin dashboard."""
+    status = database.get_status()
+    status["recording"]    = audio_capture.is_running()
+    status["transmitting"] = audio_capture.is_transmitting()
+    status["model_loaded"] = transcriber.is_model_loaded()
+    status["model_info"]   = transcriber.get_model_info()
+    status["ws_clients"]   = broadcaster.client_count()
+    status["auth_enabled"] = bool(config.AUTH_USERNAME and config.AUTH_PASSWORD)
+
+    def _git(args: list) -> str:
+        try:
+            r = subprocess.run(
+                args, cwd=str(BASE_DIR),
+                capture_output=True, text=True, timeout=5,
+            )
+            return r.stdout.strip()
+        except Exception:
+            return ""
+
+    status["git_branch"]      = _git(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+    status["git_commit"]      = _git(["git", "log", "-1", "--format=%h"])
+    status["git_commit_msg"]  = _git(["git", "log", "-1", "--format=%s"])
+    status["git_commit_date"] = _git(["git", "log", "-1", "--format=%ci"])
+    return status
+
+
+@app.post("/api/admin/check-update")
+async def api_admin_check_update() -> dict:
+    """
+    Run `git fetch` then return how many commits HEAD is behind the remote.
+    Safe — does not modify any files.
+    """
+    loop = asyncio.get_running_loop()
+
+    def _check() -> dict:
+        def _run(args, timeout=30):
+            r = subprocess.run(
+                args, cwd=str(BASE_DIR),
+                capture_output=True, text=True, timeout=timeout,
+            )
+            return r.stdout.strip(), r.stderr.strip(), r.returncode
+
+        _, err, rc = _run(["git", "fetch", "origin"])
+        if rc != 0:
+            return {"error": err or "git fetch failed"}
+
+        branch, _, _  = _run(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+        behind_s, _,_ = _run(["git", "rev-list", "--count", f"HEAD..origin/{branch}"])
+        ahead_s, _, _ = _run(["git", "rev-list", "--count", f"origin/{branch}..HEAD"])
+        latest, _, _  = _run(["git", "log", "-1", f"origin/{branch}", "--format=%h %s"])
+
+        return {
+            "branch":        branch,
+            "behind":        int(behind_s  or "0"),
+            "ahead":         int(ahead_s   or "0"),
+            "latest_commit": latest,
+        }
+
+    return await loop.run_in_executor(None, _check)
+
+
+@app.post("/api/admin/update")
+async def api_admin_update() -> dict:
+    """
+    Pull the latest code from the remote, reinstall Python dependencies if
+    requirements.txt changed, then schedule a hot-restart via os.execv.
+    Returns the combined git / pip output before restarting.
+    """
+    loop = asyncio.get_running_loop()
+
+    def _update() -> dict:
+        lines: list[str] = []
+
+        def _run(args, timeout=300):
+            lines.append("$ " + " ".join(str(a) for a in args))
+            r = subprocess.run(
+                args, cwd=str(BASE_DIR),
+                capture_output=True, text=True, timeout=timeout,
+            )
+            out = (r.stdout + r.stderr).strip()
+            if out:
+                lines.append(out)
+            return r.returncode, r.stdout
+
+        rc, stdout = _run(["git", "pull"], timeout=60)
+        if rc != 0:
+            return {"success": False, "output": "\n".join(lines)}
+
+        # Reinstall dependencies only if requirements.txt was updated.
+        if "requirements.txt" in stdout:
+            _run([sys.executable, "-m", "pip", "install", "-r",
+                  str(BASE_DIR / "requirements.txt")])
+
+        return {"success": True, "output": "\n".join(lines), "restarting": True}
+
+    result = await loop.run_in_executor(None, _update)
+
+    if result.get("restarting"):
+        _schedule_restart()
+
+    return result
+
+
+@app.post("/api/admin/restart")
+async def api_admin_restart() -> dict:
+    """Hot-restart the server process via os.execv (no pull)."""
+    _schedule_restart()
+    return {"restarting": True}
+
+
+def _schedule_restart() -> None:
+    """
+    Replace the current process with a fresh copy of itself after a short
+    delay so the HTTP response has time to be sent to the client first.
+    os.execv is safe: the OS cleans up all threads and file handles;
+    SQLite WAL mode recovers cleanly on the next open.
+    """
+    def _restart():
+        time.sleep(0.5)
+        logger.info("Restarting server process via os.execv…")
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
+    threading.Thread(target=_restart, name="restart-trigger", daemon=True).start()
