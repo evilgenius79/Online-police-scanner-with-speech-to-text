@@ -97,3 +97,14 @@ WHISPER_INITIAL_PROMPT = (
 # ─── Server ───────────────────────────────────────────────────────────────────
 HOST = "0.0.0.0"
 PORT = 8000
+
+# ─── Optional HTTP Basic Authentication ──────────────────────────────────────
+# Leave both empty (the default) to allow unauthenticated access on the LAN.
+# Set both to enable a username/password prompt in the browser.
+AUTH_USERNAME = ""
+AUTH_PASSWORD = ""
+
+# ─── Clip Retention ───────────────────────────────────────────────────────────
+# Automatically delete clips and their transcripts older than this many days.
+# Set to 0 to keep clips forever.
+CLIP_RETENTION_DAYS = 30

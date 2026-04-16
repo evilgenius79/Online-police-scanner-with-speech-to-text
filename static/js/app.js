@@ -326,7 +326,17 @@ async function pollStatus() {
     document.getElementById('stat-total').textContent   = data.total_clips ?? '—';
     document.getElementById('stat-pending').textContent = data.pending_transcription ?? '—';
     document.getElementById('stat-clients').textContent = data.ws_clients ?? '—';
-    document.getElementById('stat-model').textContent   = data.model_loaded ? 'Yes' : 'Loading…';
+
+    const modelEl = document.getElementById('stat-model');
+    const info = data.model_info;
+    if (info && info.model) {
+      // Show "large-v3" (compact), full detail in tooltip.
+      modelEl.textContent = info.model;
+      modelEl.title = `Device: ${info.device}  Compute: ${info.compute_type}`;
+    } else {
+      modelEl.textContent = data.model_loaded ? 'Loading…' : 'Not loaded';
+      modelEl.title = '';
+    }
   } catch {
     // Network error – don't crash the UI
   }
@@ -527,6 +537,25 @@ function buildClipCard(clip) {
   card.querySelector('.clip-time').textContent     = formatDateTime(clip.start_time);
   card.querySelector('.clip-duration').textContent = formatDuration(clip.duration);
 
+  // Download button
+  const dlBtn = card.querySelector('.clip-download');
+  dlBtn.href = clip.audio_url;
+  // Derive a friendly filename: "2024-01-15_143022.wav"
+  const dlName = clip.audio_url.replace('/audio/', '').replace('/', '_');
+  dlBtn.setAttribute('download', dlName);
+
+  // Waveform canvas
+  const wfCanvas = card.querySelector('.clip-waveform');
+  if (clip.waveform) {
+    try {
+      drawWaveform(wfCanvas, JSON.parse(clip.waveform));
+    } catch {
+      wfCanvas.style.display = 'none';
+    }
+  } else {
+    wfCanvas.style.display = 'none';
+  }
+
   const textEl    = card.querySelector('.transcript-text');
   const pendingEl = card.querySelector('.transcript-pending');
 
@@ -547,6 +576,37 @@ function buildClipCard(clip) {
 
   card.querySelector('.clip-audio').src = clip.audio_url;
   return card;
+}
+
+/**
+ * Draw a 60-bar RMS waveform onto a canvas element.
+ * bars: array of float values 0–1 (RMS amplitude per bar).
+ * Draws at the canvas's native pixel dimensions (set via HTML attributes)
+ * and lets CSS scale it to fill the container.
+ */
+function drawWaveform(canvas, bars) {
+  const W = canvas.width;   // native pixel width (600 from template)
+  const H = canvas.height;  // native pixel height (36 from template)
+  const ctx = canvas.getContext('2d');
+
+  ctx.clearRect(0, 0, W, H);
+
+  const count  = bars.length;
+  const gap    = 1;
+  const barW   = Math.max((W - gap * (count - 1)) / count, 1);
+
+  for (let i = 0; i < count; i++) {
+    // Scale RMS (typically 0–0.2 for quiet audio) to visible height.
+    const amp  = Math.min(bars[i] * 8, 1.0);
+    const barH = Math.max(amp * (H - 4), 2);
+    const x    = Math.round(i * (barW + gap));
+    const y    = Math.round((H - barH) / 2);
+
+    // Colour: dim green at low amplitude, bright green at peaks.
+    const lightness = 18 + amp * 42;
+    ctx.fillStyle = `hsl(120, 65%, ${lightness}%)`;
+    ctx.fillRect(x, y, Math.ceil(barW), Math.ceil(barH));
+  }
 }
 
 function prependClip(clip) {

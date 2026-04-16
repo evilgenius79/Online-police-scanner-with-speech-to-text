@@ -14,6 +14,14 @@ Streams live audio to your browser, saves every transmission as a clip, and tran
 - **Full-text search** – search all transcripts instantly (SQLite FTS5)
 - **Date browser** – browse clips from any past day
 - **Real-time updates** – new clips and transcripts appear live without refreshing the page
+- **Per-clip waveform** – each saved clip gets a 60-bar RMS amplitude thumbnail rendered on the card
+- **Download button** – every clip card has a WAV download link so you can save individual clips
+- **Model info display** – the stats panel shows which Whisper model and device actually loaded (useful when the cascade kicks in)
+- **Export transcripts** – `/api/export?format=csv` or `?format=txt` downloads all transcripts (optionally filtered by `?date=YYYY-MM-DD`)
+- **Automatic clip cleanup** – configurable retention period deletes old WAV files and DB records automatically
+- **Auto-reconnect** – if the USB audio device is unplugged, the capture stream restarts automatically with exponential back-off
+- **Orphan recovery** – clips that were saved but never transcribed (e.g. after a crash) are re-queued automatically on next startup
+- **Optional Basic Auth** – protect the UI with a username/password via two lines in `config.py`
 
 ---
 
@@ -141,6 +149,46 @@ WHISPER_MODEL  = "small.en"   # large models are too slow on CPU
 
 The cascade still applies on CPU: if the configured model exceeds RAM it will try `small.en → base.en → tiny.en` automatically.
 
+### HTTP Basic Authentication
+
+Leave both values empty (the default) for open LAN access.  Set both to enable a browser password prompt:
+
+```python
+# In config.py:
+AUTH_USERNAME = "scanner"
+AUTH_PASSWORD = "s3cr3t"
+```
+
+All routes — including WebSocket and audio files — are gated by the middleware.  Credentials are compared with `secrets.compare_digest` to prevent timing attacks.
+
+> If you use Basic Auth over HTTP (not HTTPS), credentials are base64-encoded but not encrypted.  Use a reverse proxy with TLS for any internet-facing deployment.
+
+### Automatic clip retention
+
+Clips older than `CLIP_RETENTION_DAYS` are deleted automatically every 24 hours (both WAV files and database records):
+
+```python
+# In config.py:
+CLIP_RETENTION_DAYS = 30   # set to 0 to keep clips forever
+```
+
+### Exporting transcripts
+
+Download all transcripts via the browser or `curl`:
+
+```bash
+# Plain text – one entry per transmission
+curl "http://localhost:8000/api/export?format=txt" -o scanner_all.txt
+
+# CSV – suitable for spreadsheets
+curl "http://localhost:8000/api/export?format=csv" -o scanner_all.csv
+
+# Filter to a single day
+curl "http://localhost:8000/api/export?format=csv&date=2024-01-15" -o scanner_2024-01-15.csv
+```
+
+Each row contains: `id`, `start_time`, `duration_s`, `transcript`, `filename`.
+
 ---
 
 ## Project Structure
@@ -153,11 +201,12 @@ The cascade still applies on CPU: if the configured model exceeds RAM it will tr
 ├── setup.sh                ← automated install script
 │
 ├── app/
-│   ├── audio_capture.py    ← sounddevice capture + VAD state machine + clip saving
-│   ├── transcriber.py      ← faster-whisper GPU worker thread
+│   ├── audio_capture.py    ← sounddevice capture + VAD state machine + clip saving + auto-reconnect
+│   ├── transcriber.py      ← faster-whisper GPU worker thread + orphan recovery
 │   ├── broadcaster.py      ← thread→asyncio bridge for WebSocket broadcast
+│   ├── cleanup.py          ← daily retention cleanup (WAV files + DB records)
 │   ├── database.py         ← SQLite + FTS5 full-text search
-│   └── main.py             ← FastAPI routes, WebSocket endpoint, lifecycle
+│   └── main.py             ← FastAPI routes, WebSocket endpoint, auth middleware, lifecycle
 │
 ├── templates/
 │   └── index.html          ← single-page web UI
@@ -240,8 +289,9 @@ The `initial_prompt` primes Whisper with police-radio vocabulary, improving accu
 | `GET` | `/api/clips/{id}` | Single clip |
 | `GET` | `/api/search` | Full-text search (`?q=ambulance&page=1`) |
 | `GET` | `/api/dates` | All dates with clip counts |
-| `GET` | `/api/status` | Server status (recording, model loaded, etc.) |
+| `GET` | `/api/status` | Server status (recording, model info, WS clients, etc.) |
 | `GET` | `/api/devices` | List audio input devices |
+| `GET` | `/api/export` | Export transcripts (`?format=txt\|csv&date=YYYY-MM-DD`) |
 | `GET` | `/audio/{date}/{filename}` | Serve audio clip file |
 
 ### WebSocket event types
@@ -283,7 +333,11 @@ Clips accumulate over time.  A rough estimate:
 - Typical scanner activity: 5–20 minutes of transmissions per hour
 - Daily usage: **~600 MB – 2.4 GB/day** at moderate activity
 
-The `clips/` directory is organised by date (`clips/YYYY-MM-DD/`) for easy manual cleanup.  To delete clips older than 30 days:
+The `clips/` directory is organised by date (`clips/YYYY-MM-DD/`) for easy manual cleanup.
+
+**Automatic retention** (recommended): set `CLIP_RETENTION_DAYS` in `config.py` and the server will delete old files and DB records once per day.
+
+To delete clips manually (older than 30 days):
 
 ```bash
 find clips/ -mindepth 1 -maxdepth 1 -type d -mtime +30 -exec rm -rf {} +
@@ -329,6 +383,7 @@ This app is designed for **local network use only** and is not hardened for publ
 | CORS restricted to GET | No POST/PUT/DELETE methods are exposed across origins |
 | WebSocket connection cap | Maximum 20 simultaneous WS clients; excess connections receive `1008 Policy Violation` |
 | No API docs exposed | `/docs`, `/redoc`, and `/openapi.json` are all disabled |
+| Optional Basic Auth | All routes can be protected with a username/password set in `config.py`; uses `secrets.compare_digest` to prevent timing attacks |
 
 **Do not expose port 8000 directly to the internet.**  If you need remote access, put it behind a reverse proxy (nginx/Caddy) with authentication.
 

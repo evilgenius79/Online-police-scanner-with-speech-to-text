@@ -21,9 +21,11 @@ Frame format expected by webrtcvad:
   - Channels:    1 (mono)
   - Duration:    exactly 30 ms → 480 samples → 960 bytes
 """
+import json
 import logging
 import queue
 import threading
+import time
 import wave
 from collections import deque
 from datetime import datetime
@@ -48,8 +50,10 @@ except ImportError:
 # ── Module-level state (protected by _state_lock where needed) ────────────────
 _state_lock = threading.Lock()
 _running = False
-_stream = None           # sounddevice InputStream
-_vad_thread = None       # background VAD worker thread
+_stream = None            # sounddevice InputStream
+_vad_thread = None        # background VAD worker thread
+_watchdog_thread = None   # stream health monitor / auto-reconnect thread
+_stream_stopped = threading.Event()   # set when the stream dies unexpectedly
 
 _raw_queue: queue.Queue = queue.Queue(maxsize=1000)
 _transcription_queue: Optional[queue.Queue] = None
@@ -70,10 +74,10 @@ def configure(transcription_queue: queue.Queue, broadcaster) -> None:
 
 def start(device_index: Optional[int] = None) -> None:
     """
-    Start the audio capture stream and VAD worker thread.
+    Start the audio capture stream, VAD worker, and reconnect watchdog.
     Raises RuntimeError if sounddevice cannot open the requested device.
     """
-    global _running, _stream, _vad_thread
+    global _running, _stream, _vad_thread, _watchdog_thread
 
     import config
     import sounddevice as sd
@@ -85,6 +89,7 @@ def start(device_index: Optional[int] = None) -> None:
         config.CLIPS_DIR.mkdir(parents=True, exist_ok=True)
 
         _running = True
+        _stream_stopped.clear()
 
         # Start VAD worker before the stream so frames are never lost.
         _vad_thread = threading.Thread(
@@ -93,6 +98,14 @@ def start(device_index: Optional[int] = None) -> None:
             daemon=True,
         )
         _vad_thread.start()
+
+        # Start watchdog that auto-reconnects if the device is unplugged.
+        _watchdog_thread = threading.Thread(
+            target=_reconnect_watchdog,
+            name="audio-watchdog",
+            daemon=True,
+        )
+        _watchdog_thread.start()
 
         # Open the sounddevice InputStream.
         # blocksize == CHUNK_SIZE ensures each callback delivers exactly one
@@ -106,12 +119,14 @@ def start(device_index: Optional[int] = None) -> None:
                 blocksize=config.CHUNK_SIZE,
                 device=device,
                 callback=_audio_callback,
+                finished_callback=_on_stream_finished,
                 latency="low",
             )
             _stream.start()
         except Exception:
             _running = False
             _vad_thread = None
+            _watchdog_thread = None
             raise
 
         logger.info(
@@ -123,13 +138,14 @@ def start(device_index: Optional[int] = None) -> None:
 
 
 def stop() -> None:
-    """Gracefully stop capture and wait for the VAD worker to finish."""
+    """Gracefully stop capture and wait for the worker threads to finish."""
     global _running, _stream
 
     with _state_lock:
         if not _running:
             return
         _running = False
+        _stream_stopped.set()   # wake the watchdog so it exits promptly
         if _stream is not None:
             try:
                 _stream.stop()
@@ -140,6 +156,8 @@ def stop() -> None:
 
     if _vad_thread is not None:
         _vad_thread.join(timeout=5)
+    if _watchdog_thread is not None:
+        _watchdog_thread.join(timeout=5)
 
     logger.info("Audio capture stopped")
 
@@ -165,6 +183,78 @@ def list_devices() -> list:
                 "default_samplerate": int(dev["default_samplerate"]),
             })
     return devices
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stream finished callback + auto-reconnect watchdog
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _on_stream_finished() -> None:
+    """Called by sounddevice when the stream stops for any reason."""
+    if _running:
+        logger.warning("Audio stream stopped unexpectedly – reconnect watchdog activated")
+        _stream_stopped.set()
+
+
+def _reconnect_watchdog() -> None:
+    """
+    Monitors the audio stream and restarts it after device disconnects.
+    Uses exponential backoff (5 s → 10 s → 20 s → 60 s max) between retries.
+    """
+    delay = 5
+    while _running:
+        # Block until the stream-stopped event fires (or we're shutting down).
+        _stream_stopped.wait()
+        if not _running:
+            break
+
+        logger.info("Reconnect watchdog: retrying in %d s…", delay)
+        time.sleep(delay)
+        if not _running:
+            break
+
+        try:
+            _restart_stream()
+            _stream_stopped.clear()
+            delay = 5   # reset backoff after a successful reconnect
+            logger.info("Audio device reconnected successfully")
+        except Exception as exc:
+            delay = min(delay * 2, 60)
+            logger.warning("Reconnect failed (%s) – will retry in %d s", exc, delay)
+
+
+def _restart_stream() -> None:
+    """Close the current stream (if any) and open a fresh one."""
+    global _stream
+    import config
+    import sounddevice as sd
+
+    with _state_lock:
+        if _stream is not None:
+            try:
+                _stream.stop()
+                _stream.close()
+            except Exception:
+                pass
+            _stream = None
+
+        device = config.AUDIO_DEVICE_INDEX
+        new_stream = sd.InputStream(
+            samplerate=config.SAMPLE_RATE,
+            channels=config.CHANNELS,
+            dtype="float32",
+            blocksize=config.CHUNK_SIZE,
+            device=device,
+            callback=_audio_callback,
+            finished_callback=_on_stream_finished,
+            latency="low",
+        )
+        new_stream.start()
+        _stream = new_stream
+        logger.info(
+            "Audio stream restarted – device=%s",
+            device if device is not None else "default",
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -338,6 +428,22 @@ def _vad_worker() -> None:
 # Clip persistence
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _compute_waveform(audio_bytes: bytes, num_bars: int = 60) -> str:
+    """
+    Downsample raw int16 PCM to `num_bars` RMS amplitude values.
+    Returns a compact JSON string suitable for storage in SQLite and
+    transmission to the browser for canvas rendering.
+    """
+    samples = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32)
+    samples /= 32768.0
+    chunk = max(1, len(samples) // num_bars)
+    bars = []
+    for i in range(num_bars):
+        seg = samples[i * chunk : (i + 1) * chunk]
+        bars.append(round(float(np.sqrt(np.mean(seg ** 2))) if len(seg) else 0.0, 4))
+    return json.dumps(bars)
+
+
 def _save_clip(frames: list, start_time: datetime) -> None:
     """
     Write PCM frames to a WAV file, insert a DB record, and enqueue for STT.
@@ -361,6 +467,9 @@ def _save_clip(frames: list, start_time: datetime) -> None:
         num_samples = len(audio_bytes) // 2          # 2 bytes per int16 sample
         duration = num_samples / config.SAMPLE_RATE
 
+        # Compute waveform before writing (frames still in memory).
+        waveform_json = _compute_waveform(audio_bytes)
+
         # Write WAV container.
         with wave.open(str(filepath), "wb") as wf:
             wf.setnchannels(config.CHANNELS)
@@ -368,8 +477,8 @@ def _save_clip(frames: list, start_time: datetime) -> None:
             wf.setframerate(config.SAMPLE_RATE)
             wf.writeframes(audio_bytes)
 
-        # Insert into database.
-        clip_id = insert_clip(rel_path, start_time.isoformat(), duration)
+        # Insert into database (waveform stored alongside metadata).
+        clip_id = insert_clip(rel_path, start_time.isoformat(), duration, waveform_json)
 
         logger.info("Saved clip %d: %s  (%.1fs)", clip_id, rel_path, duration)
 

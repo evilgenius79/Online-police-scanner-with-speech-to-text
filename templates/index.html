@@ -70,8 +70,8 @@
         <span id="stat-clients" class="stat-value">—</span>
       </div>
       <div class="stat-row">
-        <span class="stat-label">Model loaded</span>
-        <span id="stat-model" class="stat-value">—</span>
+        <span class="stat-label">Model</span>
+        <span id="stat-model" class="stat-value" title="">—</span>
       </div>
     </section>
 
@@ -127,8 +127,12 @@
   <article class="clip-card" data-id="">
     <div class="clip-meta">
       <time class="clip-time"></time>
-      <span class="clip-duration"></span>
+      <div class="clip-meta-right">
+        <span class="clip-duration"></span>
+        <a class="clip-download" download title="Download WAV">&#8595; WAV</a>
+      </div>
     </div>
+    <canvas class="clip-waveform" width="600" height="36" aria-hidden="true"></canvas>
     <div class="clip-transcript">
       <p class="transcript-text"></p>
       <p class="transcript-pending hidden">Transcribing…</p>

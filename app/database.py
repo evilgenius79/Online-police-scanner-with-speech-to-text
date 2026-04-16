@@ -48,7 +48,8 @@ def init_db(db_path: str) -> None:
             start_time  TEXT    NOT NULL,
             duration    REAL    NOT NULL,
             transcript  TEXT,
-            created_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+            created_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+            waveform    TEXT
         );
 
         CREATE INDEX IF NOT EXISTS idx_clips_start_time
@@ -87,10 +88,25 @@ def init_db(db_path: str) -> None:
             END;
     """)
     conn.commit()
+
+    # Schema migration: add waveform column to existing databases that
+    # pre-date this feature.  ALTER TABLE is idempotent via the try/except.
+    try:
+        conn.execute("ALTER TABLE clips ADD COLUMN waveform TEXT")
+        conn.commit()
+        logger.debug("Migrated DB: added waveform column")
+    except sqlite3.OperationalError:
+        pass  # column already exists
+
     logger.info("Database initialized at %s", db_path)
 
 
-def insert_clip(filename: str, start_time: str, duration: float) -> int:
+def insert_clip(
+    filename: str,
+    start_time: str,
+    duration: float,
+    waveform_json: Optional[str] = None,
+) -> int:
     """
     Insert a new clip record.
     Returns the new clip's ID.
@@ -98,8 +114,8 @@ def insert_clip(filename: str, start_time: str, duration: float) -> int:
     """
     conn = _get_conn()
     cur = conn.execute(
-        "INSERT INTO clips (filename, start_time, duration) VALUES (?, ?, ?)",
-        (filename, start_time, round(duration, 3)),
+        "INSERT INTO clips (filename, start_time, duration, waveform) VALUES (?, ?, ?, ?)",
+        (filename, start_time, round(duration, 3), waveform_json),
     )
     conn.commit()
     return cur.lastrowid
@@ -116,6 +132,59 @@ def update_transcript(clip_id: int, transcript: str) -> None:
         (transcript, clip_id),
     )
     conn.commit()
+
+
+def get_pending_clips() -> list:
+    """
+    Return clips whose transcript is still NULL (e.g. orphaned after a crash).
+    Called at startup to re-queue unfinished work.
+    """
+    conn = _get_conn()
+    rows = conn.execute(
+        """SELECT id, filename, start_time, duration
+           FROM clips WHERE transcript IS NULL
+           ORDER BY id""",
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def delete_clips_before(cutoff_date: str) -> int:
+    """
+    Delete all clip records whose start_time is before cutoff_date (YYYY-MM-DD).
+    Returns the number of rows deleted.
+    The FTS5 delete trigger removes them from the search index automatically.
+    """
+    conn = _get_conn()
+    cur = conn.execute(
+        "DELETE FROM clips WHERE date(start_time) < ?",
+        (cutoff_date,),
+    )
+    conn.commit()
+    return cur.rowcount
+
+
+def export_clips(date: Optional[str] = None) -> list:
+    """
+    Return all clips (optionally filtered to one date) ordered by start_time.
+    Used by the /api/export endpoint.
+    """
+    conn = _get_conn()
+    if date:
+        rows = conn.execute(
+            """SELECT id, filename, start_time, duration, transcript
+               FROM clips
+               WHERE date(start_time) = ? AND transcript IS NOT NULL
+               ORDER BY start_time""",
+            (date,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """SELECT id, filename, start_time, duration, transcript
+               FROM clips
+               WHERE transcript IS NOT NULL
+               ORDER BY start_time""",
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def get_clips(
@@ -136,7 +205,7 @@ def get_clips(
             (date,),
         ).fetchone()[0]
         rows = conn.execute(
-            """SELECT id, filename, start_time, duration, transcript, created_at
+            """SELECT id, filename, start_time, duration, transcript, created_at, waveform
                FROM clips
                WHERE date(start_time) = ?
                ORDER BY start_time DESC
@@ -146,7 +215,7 @@ def get_clips(
     else:
         total = conn.execute("SELECT COUNT(*) FROM clips").fetchone()[0]
         rows = conn.execute(
-            """SELECT id, filename, start_time, duration, transcript, created_at
+            """SELECT id, filename, start_time, duration, transcript, created_at, waveform
                FROM clips
                ORDER BY start_time DESC
                LIMIT ? OFFSET ?""",
@@ -166,7 +235,7 @@ def get_clip(clip_id: int) -> Optional[dict]:
     """Return a single clip by ID, or None if not found."""
     conn = _get_conn()
     row = conn.execute(
-        """SELECT id, filename, start_time, duration, transcript, created_at
+        """SELECT id, filename, start_time, duration, transcript, created_at, waveform
            FROM clips WHERE id = ?""",
         (clip_id,),
     ).fetchone()
@@ -215,7 +284,7 @@ def search_clips(
             (like,),
         ).fetchone()[0]
         rows = conn.execute(
-            """SELECT id, filename, start_time, duration, transcript, created_at,
+            """SELECT id, filename, start_time, duration, transcript, created_at, waveform,
                       transcript AS snippet
                FROM clips
                WHERE transcript LIKE ? ESCAPE '\\'

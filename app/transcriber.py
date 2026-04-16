@@ -27,6 +27,7 @@ _thread: Optional[threading.Thread] = None
 _transcription_queue: Optional[queue.Queue] = None
 _broadcaster = None
 _model = None          # faster_whisper.WhisperModel instance
+_model_info: dict = {} # {"model": "large-v3", "device": "cuda", "compute_type": "float16"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -68,6 +69,11 @@ def is_model_loaded() -> bool:
     return _model is not None
 
 
+def get_model_info() -> dict:
+    """Return which model/device/compute_type actually loaded (empty dict until ready)."""
+    return _model_info.copy()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Worker thread
 # ─────────────────────────────────────────────────────────────────────────────
@@ -83,6 +89,10 @@ def _worker() -> None:
         return
 
     logger.info("Transcription worker ready")
+
+    # Re-queue any clips that were saved but never transcribed (e.g. the server
+    # was killed mid-queue or crashed before this worker could process them).
+    _recover_orphaned_clips()
 
     while _running:
         try:
@@ -212,7 +222,7 @@ def _load_model():
             "Trying Whisper '%s' on %s/%s  (VRAM ≈ %s)",
             model_name, device, compute_type, vram,
         )
-        return WhisperModel(
+        m = WhisperModel(
             model_name,
             device=device,
             compute_type=compute_type,
@@ -220,6 +230,14 @@ def _load_model():
             cpu_threads=0,
             num_workers=1,
         )
+        # Record what actually loaded so /api/status can report it.
+        global _model_info
+        _model_info = {
+            "model":        model_name,
+            "device":       device,
+            "compute_type": compute_type,
+        }
+        return m
 
     # ── CUDA path ─────────────────────────────────────────────────────────────
     if config.WHISPER_DEVICE == "cuda":
@@ -278,6 +296,48 @@ def _load_model():
             raise
 
     raise RuntimeError("Failed to load any Whisper model (all options exhausted)")
+
+
+def _recover_orphaned_clips() -> None:
+    """
+    Re-queue clips that have a DB record but no transcript (NULL).
+    This handles cases where the server was stopped while clips were queued,
+    or crashed before the transcription worker could process them.
+    """
+    import config
+    from app.database import delete_clip, get_pending_clips
+
+    pending = get_pending_clips()
+    if not pending:
+        return
+
+    logger.info("Found %d orphaned clip(s) – re-queuing for transcription", len(pending))
+    requeued = 0
+    for clip in pending:
+        filepath = config.CLIPS_DIR / clip["filename"]
+        if not filepath.is_file():
+            # File missing — clean up the dangling DB record.
+            delete_clip(clip["id"])
+            logger.warning(
+                "Orphaned clip %d has no WAV file – removed DB record", clip["id"]
+            )
+            continue
+        try:
+            _transcription_queue.put_nowait({
+                "id":         clip["id"],
+                "path":       str(filepath),
+                "filename":   clip["filename"],
+                "start_time": clip["start_time"],
+                "duration":   clip["duration"],
+            })
+            requeued += 1
+        except queue.Full:
+            logger.warning(
+                "Transcription queue full – could not re-queue orphaned clip %d",
+                clip["id"],
+            )
+    if requeued:
+        logger.info("Re-queued %d orphaned clip(s)", requeued)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -11,26 +11,30 @@ Shutdown order (reverse):
   audio_capture.stop() → transcriber.stop()
 """
 import asyncio
+import base64
+import csv
+import io
 import json
 import logging
 import os
 import queue
 import re
+import secrets
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 # Ensure project root is importable (needed when running as `python app/main.py`)
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import config
-from app import audio_capture, database, transcriber
+from app import audio_capture, cleanup, database, transcriber
 from app.broadcaster import AudioBroadcaster
 
 logger = logging.getLogger(__name__)
@@ -68,6 +72,8 @@ async def _lifespan(app: FastAPI):
         # audio device is unavailable.
         logger.error("Audio capture could not start: %s", exc)
 
+    cleanup.start()
+
     logger.info("Scanner server ready at http://%s:%d", config.HOST, config.PORT)
 
     yield   # ── Application runs here ─────────────────────────────────────────
@@ -75,6 +81,7 @@ async def _lifespan(app: FastAPI):
     # ── Shutdown ──────────────────────────────────────────────────────────────
     audio_capture.stop()
     transcriber.stop()
+    cleanup.stop()
 
 
 # ── FastAPI app ───────────────────────────────────────────────────────────────
@@ -99,6 +106,34 @@ app.add_middleware(
     allow_methods=["GET"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def _basic_auth(request: Request, call_next):
+    """
+    Optional HTTP Basic Authentication gate.
+    Enabled only when AUTH_USERNAME and AUTH_PASSWORD are both non-empty in config.py.
+    WebSocket upgrades pass through the same middleware automatically.
+    """
+    if not config.AUTH_USERNAME or not config.AUTH_PASSWORD:
+        return await call_next(request)
+
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Basic "):
+        try:
+            decoded = base64.b64decode(auth[6:]).decode("utf-8", errors="replace")
+            username, _, password = decoded.partition(":")
+            if secrets.compare_digest(username, config.AUTH_USERNAME) and \
+               secrets.compare_digest(password, config.AUTH_PASSWORD):
+                return await call_next(request)
+        except Exception:
+            pass
+
+    return Response(
+        content="Unauthorized",
+        status_code=401,
+        headers={"WWW-Authenticate": 'Basic realm="Police Scanner"'},
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -165,6 +200,7 @@ async def api_status() -> dict:
     status["recording"] = audio_capture.is_running()
     status["transmitting"] = audio_capture.is_transmitting()
     status["model_loaded"] = transcriber.is_model_loaded()
+    status["model_info"] = transcriber.get_model_info()
     status["ws_clients"] = broadcaster.client_count()
     return status
 
@@ -222,6 +258,58 @@ async def api_search(
 async def api_dates() -> list:
     """Return all dates that have clips, with counts, newest first."""
     return database.get_dates()
+
+
+@app.get("/api/export")
+async def api_export(
+    format: str = Query("txt", description="Export format: txt or csv"),
+    date: Optional[str] = Query(None, description="Filter by date YYYY-MM-DD"),
+) -> StreamingResponse:
+    """
+    Export clip transcripts as plain text or CSV.
+
+    Query parameters:
+      format  – "txt" (default) or "csv"
+      date    – optional YYYY-MM-DD filter; omit to export everything
+    """
+    if format not in ("txt", "csv"):
+        raise HTTPException(status_code=400, detail="format must be 'txt' or 'csv'")
+    if date is not None and not _DATE_RE.match(date):
+        raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+
+    clips = database.export_clips(date=date)
+    label = date or "all"
+
+    if format == "csv":
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(["id", "start_time", "duration_s", "transcript", "filename"])
+        for clip in clips:
+            writer.writerow([
+                clip["id"],
+                clip["start_time"],
+                round(clip["duration"], 3),
+                clip["transcript"] or "",
+                clip["filename"],
+            ])
+        content = buf.getvalue()
+        media_type = "text/csv; charset=utf-8"
+        filename = f"scanner_{label}.csv"
+    else:
+        lines: list[str] = []
+        for clip in clips:
+            lines.append(f"[{clip['start_time']}]  ({clip['duration']:.1f}s)  {clip['filename']}")
+            lines.append(clip["transcript"] or "(no transcript)")
+            lines.append("")
+        content = "\n".join(lines)
+        media_type = "text/plain; charset=utf-8"
+        filename = f"scanner_{label}.txt"
+
+    return StreamingResponse(
+        iter([content]),
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

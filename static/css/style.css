@@ -421,6 +421,43 @@ a:hover { text-decoration: underline; }
   padding: 0 .1em;
 }
 
+/* ── Clip meta row right side ────────────────────────────────────────────────── */
+.clip-meta-right {
+  display: flex;
+  align-items: center;
+  gap: .4rem;
+}
+
+/* ── Download link ───────────────────────────────────────────────────────────── */
+.clip-download {
+  font-size: .68rem;
+  font-weight: 600;
+  padding: .1em .5em;
+  border-radius: 4px;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  text-decoration: none;
+  white-space: nowrap;
+  transition: background .15s, color .15s, border-color .15s;
+}
+.clip-download:hover {
+  background: var(--bg-card-alt);
+  border-color: var(--link);
+  color: var(--link);
+  text-decoration: none;
+}
+
+/* ── Waveform thumbnail ───────────────────────────────────────────────────────── */
+.clip-waveform {
+  display: block;
+  width: 100%;
+  height: 36px;
+  border-radius: 3px;
+  background: #0a0e15;
+  margin-bottom: .5rem;
+}
+
 /* ── Clip audio player ───────────────────────────────────────────────────────── */
 .clip-audio {
   width: 100%;
